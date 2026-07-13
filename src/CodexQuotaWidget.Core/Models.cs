@@ -35,6 +35,7 @@ public sealed record CodexUsage
     public string UpdatedAt { get; init; } = "";
     public UsageWindow? FiveHour { get; init; }
     public UsageWindow? Weekly { get; init; }
+    public IReadOnlyList<UsageWindow> MainWindows { get; init; } = [];
     public IReadOnlyList<UsageWindow> OtherWindows { get; init; } = [];
     public IReadOnlyList<UsageWindow> ModelSpecificWindows { get; init; } = [];
     public IReadOnlyList<string> Diagnostics { get; init; } = [];

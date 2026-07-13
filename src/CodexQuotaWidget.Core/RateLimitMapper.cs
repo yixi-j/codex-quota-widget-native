@@ -30,8 +30,12 @@ public static class RateLimitMapper
         var candidates = CollectBuckets(root);
         var normalized = candidates.Select(Normalize).ToList();
         var valid = normalized.Where(x => x.Window is not null).ToList();
-        var five = SelectMain(valid, FiveHourMins);
-        var weekly = SelectMain(valid, WeeklyMins);
+        var mainBuckets = SelectMainWindows(valid);
+        var mainWindows = mainBuckets
+            .Select(x => CompleteResetAt(x.Window!))
+            .ToArray();
+        var five = mainBuckets.FirstOrDefault(x => x.Target == FiveHourMins) ?? SelectMain(valid, FiveHourMins);
+        var weekly = mainBuckets.FirstOrDefault(x => x.Target == WeeklyMins) ?? SelectMain(valid, WeeklyMins);
         var other = valid
             .Where(x => x.Window is not null && x.Window.WindowDurationMins is not FiveHourMins and not WeeklyMins && x.Kind != "modelSpecific")
             .Select(x => CompleteResetAt(x.Window!))
@@ -45,13 +49,13 @@ public static class RateLimitMapper
             .ToArray();
         var diagnostics = normalized.Where(x => !string.IsNullOrWhiteSpace(x.Diagnostic)).Select(x => x.Diagnostic!).ToList();
 
-        foreach (var ignored in valid.Where(x => x.Kind == "modelSpecific" && x.Target is FiveHourMins or WeeklyMins))
+        foreach (var ignored in valid.Where(x => x.Kind == "modelSpecific"))
         {
             diagnostics.Add($"{ignored.SourcePath}: 模型专项额度未进入主显示");
         }
 
         CodexUsage? usage = null;
-        if (five?.Window is not null || weekly?.Window is not null || other.Length > 0 || modelSpecific.Length > 0)
+        if (mainWindows.Length > 0 || modelSpecific.Length > 0)
         {
             usage = new CodexUsage
             {
@@ -59,6 +63,7 @@ public static class RateLimitMapper
                 UpdatedAt = timestamp,
                 FiveHour = five?.Window is null ? null : CompleteResetAt(five.Window),
                 Weekly = weekly?.Window is null ? null : CompleteResetAt(weekly.Window),
+                MainWindows = mainWindows,
                 OtherWindows = other,
                 ModelSpecificWindows = modelSpecific,
                 Diagnostics = diagnostics
@@ -67,7 +72,7 @@ public static class RateLimitMapper
 
         var probes = normalized.Select(x => new ProbeBucket(
             x.SourcePath,
-            ReferenceEquals(x, five) ? "fiveHour" : ReferenceEquals(x, weekly) ? "weekly" : "ignored",
+            ReferenceEquals(x, five) ? "fiveHour" : ReferenceEquals(x, weekly) ? "weekly" : mainBuckets.Any(main => ReferenceEquals(main, x)) ? "main" : "ignored",
             x.Kind,
             x.Target,
             x.UsedPercent,
@@ -78,6 +83,17 @@ public static class RateLimitMapper
         return new RateLimitMapResult(usage, candidates.Count, probes, diagnostics, SummarizeShape(root));
     }
 
+    private static IReadOnlyList<NormalizedBucket> SelectMainWindows(List<NormalizedBucket> buckets)
+    {
+        return buckets
+            .Where(x => x.Window is not null && x.Kind != "modelSpecific")
+            .GroupBy(x => x.Target)
+            .Select(PreferredBucket)
+            .OrderBy(x => x.Target ?? int.MaxValue)
+            .ThenBy(x => x.Index)
+            .ToArray();
+    }
+
     private static NormalizedBucket? SelectMain(List<NormalizedBucket> buckets, int duration)
     {
         var candidates = buckets.Where(x => x.Target == duration && x.Kind != "modelSpecific").ToList();
@@ -86,6 +102,11 @@ public static class RateLimitMapper
             return null;
         }
 
+        return PreferredBucket(candidates);
+    }
+
+    private static NormalizedBucket PreferredBucket(IEnumerable<NormalizedBucket> candidates)
+    {
         return candidates
             .OrderByDescending(x => x.Kind == "shared" ? 100 : 10)
             .ThenByDescending(x => x.SourcePath.StartsWith("rateLimits.", StringComparison.Ordinal) ? 10 : 0)
@@ -168,12 +189,7 @@ public static class RateLimitMapper
         }
 
         var remaining = Math.Round(Math.Clamp(100 - usedPercent.Value, 0, 100), 2);
-        var label = duration switch
-        {
-            FiveHourMins => "5小时",
-            WeeklyMins => "本周",
-            _ => $"{duration}分钟"
-        };
+        var label = LabelForDuration(duration.Value);
 
         var window = new UsageWindow
         {
@@ -189,6 +205,34 @@ public static class RateLimitMapper
             ModelName = metadata.ModelName
         };
         return new NormalizedBucket(candidate, metadata.Kind, metadata.ModelName, duration, usedPercent, window, "");
+    }
+
+    private static string LabelForDuration(int durationMins)
+    {
+        if (durationMins == FiveHourMins)
+        {
+            return "5小时";
+        }
+        if (durationMins == WeeklyMins)
+        {
+            return "本周";
+        }
+        if (durationMins % WeeklyMins == 0)
+        {
+            var weeks = durationMins / WeeklyMins;
+            return $"{weeks}周";
+        }
+        if (durationMins % 1440 == 0)
+        {
+            var days = durationMins / 1440;
+            return $"{days}天";
+        }
+        if (durationMins % 60 == 0)
+        {
+            var hours = durationMins / 60;
+            return $"{hours}小时";
+        }
+        return $"{durationMins}分钟";
     }
 
     private static (string Kind, string ModelName) Classify(CandidateBucket candidate)

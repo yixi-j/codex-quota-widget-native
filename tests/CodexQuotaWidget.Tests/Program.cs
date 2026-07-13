@@ -5,6 +5,7 @@ var tests = new (string Name, Action Body)[]
 {
     ("usedPercent 转换为 remainingPercent", UsedPercentConvertsToRemaining),
     ("shared 87/64 优先于 Spark 100/100", SharedBucketsWinOverSpark),
+    ("没有 5h 时动态显示当前主额度", NonFiveHourSharedWindowDisplaysDynamically),
     ("只有模型专项时不进入主额度", ModelSpecificOnlyDoesNotBecomeMainQuota),
     ("小窗正文不显示 Codex 标题", OverlayBodyDoesNotShowCodexTitle),
     ("重置时间格式化", ResetTimeFormatting),
@@ -36,6 +37,7 @@ static void UsedPercentConvertsToRemaining()
     var result = RateLimitMapper.Map(document.RootElement);
     Equal(89, result.Usage!.FiveHour!.RemainingPercent);
     Equal(64, result.Usage!.Weekly!.RemainingPercent);
+    Equal(2, result.Usage!.MainWindows.Count);
 }
 
 static void SharedBucketsWinOverSpark()
@@ -60,8 +62,31 @@ static void SharedBucketsWinOverSpark()
     var result = RateLimitMapper.Map(document.RootElement);
     Equal(87, result.Usage!.FiveHour!.RemainingPercent);
     Equal(64, result.Usage!.Weekly!.RemainingPercent);
+    Equal(2, result.Usage!.MainWindows.Count);
     Equal(2, result.Usage!.ModelSpecificWindows.Count);
     True(result.ProbeBuckets.Any(x => x.BucketKind == "modelSpecific" && x.SelectedFor == "ignored"));
+}
+
+static void NonFiveHourSharedWindowDisplaysDynamically()
+{
+    using var document = JsonDocument.Parse("""
+    {
+      "rateLimits": {
+        "limitId": "codex",
+        "primary": { "usedPercent": 25, "windowDurationMins": 1440 },
+        "secondary": { "usedPercent": 40, "windowDurationMins": 10080 }
+      }
+    }
+    """);
+    var result = RateLimitMapper.Map(document.RootElement);
+    Equal(2, result.Usage!.MainWindows.Count);
+    Equal("1天", result.Usage!.MainWindows[0].Label);
+    Equal(75, result.Usage!.MainWindows[0].RemainingPercent);
+    True(result.Usage!.FiveHour is null);
+
+    var model = DisplayModelBuilder.Build(result.Usage!, new WidgetConfig(), new AutoFetchState());
+    True(model.BodyText.Contains("1天 75%", StringComparison.Ordinal));
+    False(model.BodyText.Contains("5小时 --", StringComparison.Ordinal));
 }
 
 static void ModelSpecificOnlyDoesNotBecomeMainQuota()
@@ -82,6 +107,7 @@ static void ModelSpecificOnlyDoesNotBecomeMainQuota()
     True(result.Usage is not null);
     True(result.Usage!.FiveHour is null);
     True(result.Usage!.Weekly is null);
+    Equal(0, result.Usage!.MainWindows.Count);
     Equal(2, result.Usage!.ModelSpecificWindows.Count);
 }
 

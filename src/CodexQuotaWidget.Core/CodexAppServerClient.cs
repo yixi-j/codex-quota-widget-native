@@ -23,7 +23,7 @@ public sealed class CodexAppServerClient(AppLogger logger) : IRateLimitClient, I
             await StartAsync(cancellationToken);
             var result = await RequestAsync("account/rateLimits/read", new { }, cancellationToken);
             var mapped = RateLimitMapper.Map(result);
-            if (mapped.Usage is null || (mapped.Usage.FiveHour is null && mapped.Usage.Weekly is null))
+            if (mapped.Usage is null || mapped.Usage.MainWindows.Count == 0)
             {
                 return new FetchResult
                 {

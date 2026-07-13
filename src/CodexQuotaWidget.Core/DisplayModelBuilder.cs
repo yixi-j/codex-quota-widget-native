@@ -4,14 +4,14 @@ public static class DisplayModelBuilder
 {
     public static DisplayModel Build(CodexUsage usage, WidgetConfig config, AutoFetchState state, DateTimeOffset? now = null)
     {
-        var fiveHour = usage.FiveHour;
-        var weekly = usage.Weekly;
-        var hasShared = fiveHour is not null || weekly is not null;
-        var resetLeft = $"重置 {TimeFormatters.ResetTime(fiveHour?.ResetAt, fiveHour?.ResetsAt, now)}";
-        var resetRight = TimeFormatters.ResetTime(weekly?.ResetAt, weekly?.ResetsAt, now);
+        var visibleWindows = VisibleSharedWindows(usage);
+        var primary = visibleWindows.ElementAtOrDefault(0);
+        var secondary = visibleWindows.ElementAtOrDefault(1);
+        var resetLeft = primary is null ? "重置 --" : $"重置 {TimeFormatters.ResetTime(primary.ResetAt, primary.ResetsAt, now)}";
+        var resetRight = secondary is null ? "--" : TimeFormatters.ResetTime(secondary.ResetAt, secondary.ResetsAt, now);
         var refresh = BuildRefreshCells(usage, config, state);
 
-        if (!hasShared)
+        if (primary is null)
         {
             return new DisplayModel
             {
@@ -24,17 +24,15 @@ public static class DisplayModelBuilder
             };
         }
 
-        var quotaLeft = fiveHour is null ? "5小时 --" : $"5小时 {Math.Round(fiveHour.RemainingPercent)}%";
-        var quotaRight = weekly is null ? "本周 --" : $"本周 {Math.Round(weekly.RemainingPercent)}%";
         return new DisplayModel
         {
-            QuotaLeft = quotaLeft,
-            QuotaRight = quotaRight,
+            QuotaLeft = FormatQuotaCell(primary),
+            QuotaRight = secondary is null ? "--" : FormatQuotaCell(secondary),
             ResetLeft = resetLeft,
             ResetRight = resetRight,
             RefreshLeft = refresh.Left,
             RefreshRight = refresh.Right,
-            IsWarning = (fiveHour?.RemainingPercent < 20) || (weekly?.RemainingPercent < 20)
+            IsWarning = visibleWindows.Any(x => x.RemainingPercent < 20)
         };
     }
 
@@ -78,15 +76,12 @@ public static class DisplayModelBuilder
 
         lines.Add("");
         lines.Add("主额度：");
-        if (usage.FiveHour is not null)
+        var mainWindows = SharedWindows(usage);
+        foreach (var item in mainWindows)
         {
-            lines.Add($"- 5小时：{Math.Round(usage.FiveHour.RemainingPercent)}%，重置 {TimeFormatters.ResetTime(usage.FiveHour.ResetAt, usage.FiveHour.ResetsAt)}");
+            lines.Add($"- {WindowLabel(item)}：{Math.Round(item.RemainingPercent)}%，重置 {TimeFormatters.ResetTime(item.ResetAt, item.ResetsAt)}");
         }
-        if (usage.Weekly is not null)
-        {
-            lines.Add($"- 本周：{Math.Round(usage.Weekly.RemainingPercent)}%，重置 {TimeFormatters.ResetTime(usage.Weekly.ResetAt, usage.Weekly.ResetsAt)}");
-        }
-        if (usage.FiveHour is null && usage.Weekly is null)
+        if (mainWindows.Count == 0)
         {
             lines.Add("- 未获取到共享额度");
         }
@@ -120,6 +115,53 @@ public static class DisplayModelBuilder
             return "限流冷却中";
         }
         return "未获取到额度";
+    }
+
+    private static IReadOnlyList<UsageWindow> VisibleSharedWindows(CodexUsage usage)
+    {
+        var windows = SharedWindows(usage);
+        if (windows.Count <= 2)
+        {
+            return windows;
+        }
+        return [windows[0], windows[^1]];
+    }
+
+    private static IReadOnlyList<UsageWindow> SharedWindows(CodexUsage usage)
+    {
+        if (usage.MainWindows.Count > 0)
+        {
+            return usage.MainWindows;
+        }
+
+        return new[] { usage.FiveHour, usage.Weekly }
+            .Where(x => x is not null)
+            .Cast<UsageWindow>()
+            .ToArray();
+    }
+
+    private static string FormatQuotaCell(UsageWindow window)
+    {
+        return $"{WindowLabel(window)} {Math.Round(window.RemainingPercent)}%";
+    }
+
+    private static string WindowLabel(UsageWindow window)
+    {
+        if (!string.IsNullOrWhiteSpace(window.Label))
+        {
+            return window.Label;
+        }
+
+        return window.WindowDurationMins switch
+        {
+            300 => "5小时",
+            10080 => "本周",
+            var mins when mins > 0 && mins % 10080 == 0 => $"{mins / 10080}周",
+            var mins when mins > 0 && mins % 1440 == 0 => $"{mins / 1440}天",
+            var mins when mins > 0 && mins % 60 == 0 => $"{mins / 60}小时",
+            var mins when mins > 0 => $"{mins}分钟",
+            _ => "额度"
+        };
     }
 
     private static (string Left, string Right) BuildRefreshCells(CodexUsage usage, WidgetConfig config, AutoFetchState state)
